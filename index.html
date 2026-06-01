@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>岡聯圍棋 - 道策盃 9路賽</title>
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+    <style>
+        :root { --coffee: #6f4e37; --wood: #e3c16f; --grass: #87CEEB; --gold: #FFD700; --red: #ff4444; --dark-overlay: rgba(0,0,0,0.85); }
+        body { margin: 0; background: var(--grass); font-family: "Microsoft JhengHei", sans-serif; overflow: hidden; display: flex; flex-direction: column; align-items: center; touch-action: none; transition: filter 1.5s ease; }
+        
+        /* 🔥 極度悲慘模式：高對比灰階濾鏡 */
+        body.miserable-mode {
+            filter: grayscale(95%) contrast(150%) brightness(80%);
+        }
+
+        /* 🏆 排行榜區塊 */
+        #leaderboard-zone { position: absolute; top: 5px; left: 5px; right: 5px; display: flex; flex-direction: column; gap: 4px; z-index: 110; }
+        .row-one { display: flex; gap: 4px; }
+        .row-two { width: 100%; }
+        .rank-box { background: rgba(0,0,0,0.85); color: white; border-radius: 8px; padding: 4px; border: 1px solid var(--gold); box-shadow: 0 2px 8px rgba(0,0,0,0.4); text-align: center; flex: 1; }
+        .rank-box b { font-size: 10px; display: block; margin-bottom: 2px; border-bottom: 1px solid rgba(255,255,255,0.2); padding-bottom: 2px; }
+        .rank-list-flex { display: flex; justify-content: space-around; gap: 2px; min-height: 25px; }
+        .master-grid-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; min-height: 48px; }
+        .rank-unit { flex: 1; display: flex; flex-direction: column; align-items: center; font-size: 9px; line-height: 1.1; border-right: 0.5px solid rgba(255,255,255,0.1); }
+        .rank-unit:last-child { border-right: none; }
+        .rank-unit .name { color: #ccc; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .rank-unit .steps { color: var(--gold); font-weight: bold; font-size: 11px; }
+        .master-grid-box { border-color: var(--red) !important; }
+        .master-grid-box b { color: var(--red); }
+
+        /* 選單與遊戲容器 */
+        #setup-menu { margin-top: 170px; text-align: center; background: white; padding: 25px; border-radius: 20px; width: 85%; max-width: 300px; box-shadow: 0 8px 30px rgba(0,0,0,0.3); z-index: 100; }
+        #game-container { position: relative; margin-top: 160px; z-index: 10; display: none; text-align: center; }
+        
+        /* 圍棋畫布 */
+        #board-canvas { background: var(--wood); border: 4px solid #8b4513; border-radius: 6px; cursor: pointer; box-shadow: 0 8px 20px rgba(0,0,0,0.3); display: block; margin: 0 auto; }
+        canvas#victoryCanvas { position: absolute; top: 22px; left: 0; pointer-events: none; z-index: 100; }
+        
+        .btn { background: var(--coffee); color: white; border: none; padding: 12px; margin: 8px; border-radius: 50px; font-weight: bold; cursor: pointer; font-size: 18px; box-shadow: 0 4px 0 #4e3626; width: 100%; }
+        .stats { font-size: 13px; color: white; text-shadow: 1px 1px 3px #000; margin-bottom: 5px; font-weight: bold; }
+
+        /* 自定義結算模態視窗 */
+        #result-modal {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            display: none; justify-content: center; align-items: center;
+            z-index: 200; background: rgba(0,0,0,0.6);
+            opacity: 0; transition: opacity 0.5s ease;
+        }
+        #result-modal.show { display: flex; opacity: 1; }
+        .result-content {
+            background: white; padding: 30px; border-radius: 16px; text-align: center;
+            width: 80%; max-width: 320px; box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            transform: scale(0.8); transition: transform 0.5s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+        }
+        #result-modal.show .result-content { transform: scale(1); }
+        .result-content h2 { margin: 0 0 10px 0; font-size: 28px; }
+        .result-content p { font-size: 16px; color: #555; margin-bottom: 25px; }
+
+        /* 勝利與失敗主題 */
+        .win-theme .result-content { border: 4px solid var(--gold); }
+        .win-theme h2 { color: #d4af37; }
+        .lose-theme { background: rgba(0,0,0,0.9) !important; }
+        .lose-theme .result-content { background: #2a2a2a; border: 4px solid #555; color: #ccc; }
+        .lose-theme h2 { color: var(--red); }
+        .lose-theme p { color: #999; }
+        .lose-theme .btn { background: #444; box-shadow: 0 4px 0 #222; }
+    </style>
+</head>
+<body>
+
+<script>
+// =========================================================================
+// ⚙️ [Firebase 參數延用與道策盃圍棋設定]
+// =========================================================================
+const CONFIG = {
+    BOARD_SIZE: 9,
+    TARGET_BLACK: 43, // 依照規則：9路黑棋 43子勝
+    TARGET_WHITE: 39, // 白棋 39子勝 (81 - 42)
+    firebase: {
+        apiKey: "AIzaSyBQr_3o913vgaWUg4PAuequLEVE1mZFS7M",
+        databaseURL: "https://cowgame-48dd8-default-rtdb.firebaseio.com",
+        projectId: "cowgame-48dd8"
+    }
+};
+
+firebase.initializeApp(CONFIG.firebase);
+const db = firebase.database();
+const paths = { easy: 'go_rank_easy', medium: 'go_rank_medium', hard: 'go_rank_hard' };
+const topScores = { easy: [], medium: [], hard: [] };
+</script>
+
+<div id="leaderboard-zone">
+    <div class="row-one">
+        <div class="rank-box"><b>初級 Top 3</b><div id="rank-easy" class="rank-list-flex">載入中...</div></div>
+        <div class="rank-box"><b>中級 Top 3</b><div id="rank-medium" class="rank-list-flex">載入中...</div></div>
+    </div>
+    <div class="row-two">
+        <div class="rank-box master-grid-box"><b>🔥 圍棋殿堂 Top 6 (最強 AI)</b><div id="rank-hard" class="master-grid-list">載入中...</div></div>
+    </div>
+</div>
+
+<div id="setup-menu">
+    <h1 style="color:var(--coffee); margin:0; font-size: 24px;">道策盃 9路特訓</h1>
+    <p style="font-size:12px; color:#666; margin-bottom:10px;">規則：黑棋 43子勝 / 白棋 39子勝</p>
+    <button class="btn" onclick="startGame('easy')">初級 (隨機應變)</button>
+    <button class="btn" onclick="startGame('medium')">中級 (局部圍殺)</button>
+    <button class="btn" onclick="startGame('hard')" style="background:var(--red); box-shadow:0 4px 0 #8e2020">🔥 巔峰大師 (全面封鎖)</button>
+</div>
+
+<div id="game-container">
+    <div class="stats">
+        <span id="display-lv"></span> | 
+        <span style="color:#000;">黑(你): <span id="black-count">0</span>/43</span> | 
+        <span style="color:#fff; text-shadow: 0 0 3px #000;">白(AI): <span id="white-count">0</span>/39</span>
+    </div>
+    <canvas id="board-canvas"></canvas>
+    <canvas id="victoryCanvas"></canvas>
+    <div style="display:flex; justify-content: center; gap: 10px;">
+        <button class="btn" onclick="passTurn()" style="background:#e3c16f; color:#333; box-shadow:0 4px 0 #b3954f; margin-top:10px; width:100px; font-size:12px; padding:8px;">虛手 (Pass)</button>
+        <button class="btn" onclick="location.reload()" style="background:#666; box-shadow:0 4px 0 #444; margin-top:10px; width:100px; font-size:12px; padding:8px;">回主選單</button>
+    </div>
+</div>
+
+<div id="result-modal">
+    <div class="result-content">
+        <h2 id="result-title"></h2>
+        <p id="result-msg"></p>
+        <button class="btn" onclick="location.reload()">再挑戰一局</button>
+    </div>
+</div>
+
+<script>
+// --- [1] 監聽排行榜 ---
+function listenRank(lv) {
+    const limit = (lv === 'hard') ? 6 : 3;
+    db.ref(paths[lv]).orderByChild('steps').limitToFirst(limit).on('value', snap => {
+        const listEl = document.getElementById(`rank-${lv}`);
+        topScores[lv] = [];
+        let html = "";
+        if (snap.exists()) {
+            snap.forEach(c => {
+                const d = c.val(); topScores[lv].push(d);
+                html += `<div class="rank-unit"><span class="name">${d.name}</span><span class="steps">${d.steps}步</span></div>`;
+            });
+            listEl.innerHTML = html;
+        } else { listEl.innerHTML = "<span style='color:#777; font-size:9px;'>等待紀錄</span>"; }
+    });
+}
+['easy', 'medium', 'hard'].forEach(listenRank);
+
+// --- [2] 圍棋核心變數 ---
+let board = []; 
+let steps = 0, isGameOver = false, difficulty = 'easy', frameCount = 0;
+let cellSize = 0, margin = 0, pieceRadius = 0;
+
+const boardCanvas = document.getElementById('board-canvas');
+const boardCtx = boardCanvas.getContext('2d');
+const victoryCanvas = document.getElementById('victoryCanvas');
+const victoryCtx = victoryCanvas.getContext('2d');
+const diffLabels = { easy: '初級', medium: '中級', hard: '巔峰大師' };
+
+function startGame(lv) {
+    difficulty = lv;
+    document.getElementById('setup-menu').style.display = 'none';
+    document.getElementById('game-container').style.display = 'block';
+    document.getElementById('display-lv').innerText = diffLabels[lv];
+    
+    resizeBoard();
+    initBoard();
+    requestAnimationFrame(animationLoop);
+}
+
+function resizeBoard() {
+    const screenWidth = window.innerWidth;
+    const baseSize = screenWidth < 600 ? 340 : 450;
+    boardCanvas.width = baseSize;
+    boardCanvas.height = baseSize;
+    
+    margin = baseSize / 10;
+    cellSize = (baseSize - margin * 2) / (CONFIG.BOARD_SIZE - 1);
+    pieceRadius = cellSize * 0.45;
+
+    victoryCanvas.width = baseSize;
+    victoryCanvas.height = baseSize;
+}
+
+function initBoard() {
+    board = Array(CONFIG.BOARD_SIZE).fill().map(() => Array(CONFIG.BOARD_SIZE).fill(0));
+    drawBoard();
+    updateCounts();
+    boardCanvas.onclick = handleCanvasClick;
+}
+
+function drawBoard() {
+    boardCtx.clearRect(0, 0, boardCanvas.width, boardCanvas.height);
+    boardCtx.strokeStyle = "#4e3626";
+    boardCtx.lineWidth = 1.5;
+
+    for (let i = 0; i < CONFIG.BOARD_SIZE; i++) {
+        boardCtx.beginPath();
+        boardCtx.moveTo(margin, margin + i * cellSize);
+        boardCtx.lineTo(boardCanvas.width - margin, margin + i * cellSize);
+        boardCtx.stroke();
+
+        boardCtx.beginPath();
+        boardCtx.moveTo(margin + i * cellSize, margin);
+        boardCtx.lineTo(margin + i * cellSize, boardCanvas.height - margin);
+        boardCtx.stroke();
+    }
+
+    const centerIdx = Math.floor(CONFIG.BOARD_SIZE / 2);
+    const cx = margin + centerIdx * cellSize;
+    const cy = margin + centerIdx * cellSize;
+    boardCtx.beginPath();
+    boardCtx.arc(cx, cy, 4, 0, Math.PI * 2);
+    boardCtx.fillStyle = "#4e3626";
+    boardCtx.fill();
+
+    for (let r = 0; r < CONFIG.BOARD_SIZE; r++) {
+        for (let colIdx = 0; colIdx < CONFIG.BOARD_SIZE; colIdx++) {
+            if (board[r][colIdx] !== 0) {
+                const px = margin + colIdx * cellSize;
+                const py = margin + r * cellSize;
+                
+                boardCtx.beginPath();
+                boardCtx.arc(px, py, pieceRadius, 0, Math.PI * 2);
+                
+                if (board[r][colIdx] === 1) { 
+                    let grad = boardCtx.createRadialGradient(px - pieceRadius*0.3, py - pieceRadius*0.3, pieceRadius*0.1, px, py, pieceRadius);
+                    grad.addColorStop(0, '#555'); grad.addColorStop(1, '#000');
+                    boardCtx.fillStyle = grad;
+                } else { 
+                    let grad = boardCtx.createRadialGradient(px - pieceRadius*0.3, py - pieceRadius*0.3, pieceRadius*0.1, px, py, pieceRadius);
+                    grad.addColorStop(0, '#fff'); grad.addColorStop(1, '#ccc');
+                    boardCtx.fillStyle = grad;
+                }
+                boardCtx.fill();
+                boardCtx.strokeStyle = board[r][colIdx] === 1 ? "#000" : "#999";
+                boardCtx.lineWidth = 1;
+                boardCtx.stroke();
+            }
+        }
+    }
+}
+
+function handleCanvasClick(e) {
+    if (isGameOver) return;
+
+    const rect = boardCanvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    const c = Math.round((x - margin) / cellSize);
+    const r = Math.round((y - margin) / cellSize);
+
+    if (r >= 0 && r < CONFIG.BOARD_SIZE && c >= 0 && c < CONFIG.BOARD_SIZE) {
+        if (board[r][c] !== 0) return;
+
+        board[r][c] = 1;
+        let capturedAny = checkAndCapture(2);
+
+        if (!capturedAny && !hasLiberty(r, c, 1, new Set())) {
+            board[r][c] = 0; 
+            alert("此處為自殺禁手點！");
+            return;
+        }
+
+        steps++;
+        drawBoard();
+        const counts = updateCounts();
+
+        // 黑棋達 43 子獲勝
+        if (counts.black >= CONFIG.TARGET_BLACK) { endGame(true); return; }
+
+        setTimeout(npcMove, 400);
+    }
+}
+
+function passTurn() {
+    if (isGameOver) return;
+    steps++;
+    setTimeout(npcMove, 200);
+}
+
+// --- [3] 圍棋規則計算引擎 ---
+function getNeighbors(r, c) {
+    const list = [];
+    if (r > 0) list.push({r: r - 1, c: c});
+    if (r < CONFIG.BOARD_SIZE - 1) list.push({r: r + 1, c: c});
+    if (c > 0) list.push({r: r, c: c - 1});
+    if (c < CONFIG.BOARD_SIZE - 1) list.push({r: r, c: c + 1});
+    return list;
+}
+
+function hasLiberty(r, c, color, visited) {
+    const key = `${r},${c}`;
+    if (visited.has(key)) return false;
+    visited.add(key);
+
+    const neighbors = getNeighbors(r, c);
+    for (let n of neighbors) {
+        if (board[n.r][n.c] === 0) return true; 
+        if (board[n.r][n.c] === color) {
+            if (hasLiberty(n.r, n.c, color, visited)) return true;
+        }
+    }
+    return false;
+}
+
+function checkAndCapture(targetColor) {
+    let capturedAny = false;
+    const globalVisited = new Set();
+
+    for (let r = 0; r < CONFIG.BOARD_SIZE; r++) {
+        for (let c = 0; c < CONFIG.BOARD_SIZE; c++) {
+            if (board[r][c] === targetColor && !globalVisited.has(`${r},${c}`)) {
+                const block = new Set();
+                if (!hasLiberty(r, c, targetColor, block)) {
+                    block.forEach(pos => {
+                        const [br, bc] = pos.split(',').map(Number);
+                        board[br][bc] = 0;
+                    });
+                    capturedAny = true;
+                }
+                block.forEach(pos => globalVisited.add(pos));
+            }
+        }
+    }
+    return capturedAny;
+}
+
+function updateCounts() {
+    let black = 0, white = 0;
+    for (let r = 0; r < CONFIG.BOARD_SIZE; r++) {
+        for (let c = 0; c < CONFIG.BOARD_SIZE; c++) {
+            if (board[r][c] === 1) black++;
+            if (board[r][c] === 2) white++;
+        }
+    }
+    document.getElementById('black-count').innerText = black;
+    document.getElementById('white-count').innerText = white;
+    return { black, white };
+}
+
+// --- [4] AI 引擎 ---
+function npcMove() {
+    if (isGameOver) return;
+
+    let bestMove = findBestGoMove();
+    if (bestMove) {
+        board[bestMove.r][bestMove.c] = 2; 
+        checkAndCapture(1); 
+        drawBoard();
+        const counts = updateCounts();
+
+        // 白棋達 39 子獲勝
+        if (counts.white >= CONFIG.TARGET_WHITE) {
+            endGame(false);
+            return;
+        }
+    }
+}
+
+function findBestGoMove() {
+    let candidates = [];
+    
+    for (let r = 0; r < CONFIG.BOARD_SIZE; r++) {
+        for (let c = 0; c < CONFIG.BOARD_SIZE; c++) {
+            if (board[r][c] === 0) {
+                board[r][c] = 2;
+                let isSelfSuicide = !hasLiberty(r, c, 2, new Set());
+                board[r][c] = 0; 
+                
+                if (isSelfSuicide) continue; 
+
+                let score = 0;
+                const neighbors = getNeighbors(r, c);
+                
+                neighbors.forEach(n => {
+                    if (board[n.r][n.c] === 1) score += (difficulty === 'hard' ? 4 : 2); 
+                    if (board[n.r][n.c] === 2) score += 3; 
+                    if (board[n.r][n.c] === 0) score += 1; 
+                });
+
+                const centerDist = Math.abs(r - 4) + Math.abs(c - 4);
+                score += (8 - centerDist) * 0.2;
+
+                candidates.push({ r, c, score });
+            }
+        }
+    }
+
+    if (candidates.length === 0) return null;
+
+    if (difficulty === 'easy') {
+        return candidates[Math.floor(Math.random() * candidates.length)];
+    } else if (difficulty === 'medium') {
+        candidates.sort((a, b) => b.score - a.score);
+        const pool = candidates.slice(0, Math.min(3, candidates.length));
+        return pool[Math.floor(Math.random() * pool.length)];
+    } else { 
+        candidates.sort((a, b) => b.score - a.score);
+        return candidates[0];
+    }
+}
+
+// --- [5] 結算處理 ---
+function endGame(win) {
+    isGameOver = true;
+    const modal = document.getElementById('result-modal');
+    const title = document.getElementById('result-title');
+    const msg = document.getElementById('result-msg');
+
+    modal.classList.remove('win-theme', 'lose-theme');
+
+    if (win) {
+        modal.classList.add('win-theme');
+        title.innerHTML = "🏆 恭喜棋聖獲勝！";
+        msg.innerHTML = `在 [${diffLabels[difficulty]}] 難度下，你用了 <b>${steps}</b> 步，成功拿下 43 子！`;
+        
+        const limit = (difficulty === 'hard') ? 6 : 3;
+        const myList = topScores[difficulty];
+        const isTop = myList.length < limit || steps < myList[myList.length - 1].steps;
+        if (isTop) {
+            setTimeout(() => {
+                const name = prompt(`🎉 棋藝非凡破紀錄！請輸入大名登錄榜單：`) || "圍棋大師";
+                db.ref(paths[difficulty]).push({ name, steps, time: Date.now() });
+            }, 800);
+        }
+    } else {
+        document.body.classList.add('miserable-mode');
+        modal.classList.add('lose-theme');
+        title.innerHTML = "💀 大意失荊州...";
+        msg.innerHTML = `AI 已經率先奪得 39 子。<br>重新布陣再來一局吧？`;
+    }
+    
+    setTimeout(() => {
+        modal.classList.add('show');
+    }, 100);
+}
+
+function animationLoop() {
+    frameCount++;
+    if (isGameOver) {
+        victoryCtx.clearRect(0, 0, victoryCanvas.width, victoryCanvas.height);
+        for(let i=0; i<30; i++) {
+            victoryCtx.fillStyle = i % 2 === 0 ? 'gold' : 'rgba(255,255,255,0.8)';
+            victoryCtx.beginPath();
+            let speed = isGameOver && document.body.classList.contains('miserable-mode') ? 0.5 : 2;
+            let x = (frameCount * speed + i * 80) % victoryCanvas.width;
+            let y = victoryCanvas.height - (frameCount * (speed * 0.8) + i * 70) % victoryCanvas.height; 
+            let radius = (Math.sin(i) * 5 + 5); 
+            victoryCtx.arc(x, y, radius, 0, Math.PI * 2); 
+            victoryCtx.fill();
+        }
+    }
+    requestAnimationFrame(animationLoop);
+}
+</script>
+</body>
+</html>
